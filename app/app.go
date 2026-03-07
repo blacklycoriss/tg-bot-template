@@ -25,23 +25,29 @@ func Start() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	//Add default handler
+	//Set Bot options
 	opts := []bot.Option{
+		//Add Middlewares (log user input)
 		bot.WithMiddlewares(showMessageWithUserID, showMessageWithUserName),
+		//Add default handler (handle every user message)
 		bot.WithDefaultHandler(handler),
 	}
-	log.Println("Create bot options")
+	log.Println("Created bot options")
 
 	//Bot init
 	b, err := bot.New("YOUR_BOT_TOKEN_FROM_BOTFATHER", opts...)
 	if err != nil {
-		log.Panicf("Can't create bot with error %s", err)
+		log.Panicf("Can't init bot with error %s", err)
 	}
 
-	log.Println("Bot started")
+	log.Println("Start Bot")
 	//Bot start
 	b.Start(ctx)
 }
+
+//-----------------------------------------------------------------------------------------------------
+
+//METHODS
 
 // Handler-method
 func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -50,7 +56,7 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 
 	switch user_text {
 	case "/start":
-		send_text = "Начинаем"
+		send_text = "Привет!\nЯ - бот, который следит за подпиской и перенаправляет тебя в ловушку Джокера (в TG mini app).\nДавай дружить, иначе у тебя писька отвалится."
 	default:
 		send_text = "Не понимаю тебя\n"
 	}
