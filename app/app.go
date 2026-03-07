@@ -33,7 +33,7 @@ func Start() {
 
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "check_sub", bot.MatchTypeExact, checkSubscriptionHandler)
 
-	b.RegisterHandler(bot.HandlerTypeMessageText, "", bot.MatchTypePrefix, echoHandler)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "", bot.MatchTypePrefix, openTMA)
 
 	log.Println("Бот запущен")
 	b.Start(ctx)

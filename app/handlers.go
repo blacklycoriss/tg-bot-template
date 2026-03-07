@@ -53,20 +53,12 @@ func checkSubscriptionHandler(ctx context.Context, b *bot.Bot, update *models.Up
 		})
 	}
 }
-func echoHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+func openTMA(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
 
-	text := update.Message.Text
-	if text == "" {
-		text = "…"
-	}
-
-	b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   "Ты написал: " + text,
-	})
+	sendTMAButton(ctx, b, update)
 }
 func isUserChannelMember(ctx context.Context, b *bot.Bot, userID int64) (bool, error) {
 	member, err := b.GetChatMember(ctx, &bot.GetChatMemberParams{
@@ -114,4 +106,28 @@ func thankYou(ctx context.Context, b *bot.Bot, chatID any) {
 		Text:      "Спасибо за подписку! 🎉\nТеперь можем общаться без ограничений.",
 		ParseMode: models.ParseModeHTML,
 	})
+}
+
+func sendTMAButton(ctx context.Context, b *bot.Bot, update *models.Update) {
+	chatID := update.Message.Chat.ID
+
+	msg := &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   "Нажми, чтобы открыть мини-приложение!",
+		ReplyMarkup: &models.InlineKeyboardMarkup{
+			InlineKeyboard: [][]models.InlineKeyboardButton{
+				{
+					{
+						Text:   "Открыть TMA 🚀",
+						WebApp: &models.WebAppInfo{URL: "http://localhost:8080"},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := b.SendMessage(ctx, msg)
+	if err != nil {
+		// Обработка ошибки
+	}
 }
