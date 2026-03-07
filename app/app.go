@@ -40,6 +40,9 @@ func Start() {
 		log.Panicf("Can't init bot with error %s", err)
 	}
 
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact, startHandler)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/check", bot.MatchTypeExact, checkSubscriptionHandler)
+
 	log.Println("Start Bot")
 	//Bot start
 	b.Start(ctx)
@@ -48,6 +51,14 @@ func Start() {
 //-----------------------------------------------------------------------------------------------------
 
 //METHODS
+
+func startHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+
+}
+
+func checkSubscriptionHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+
+}
 
 // Handler-method
 func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
