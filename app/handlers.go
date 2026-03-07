@@ -119,7 +119,7 @@ func sendTMAButton(ctx context.Context, b *bot.Bot, update *models.Update) {
 				{
 					{
 						Text:   "Открыть TMA 🚀",
-						WebApp: &models.WebAppInfo{URL: "http://localhost:8080"},
+						WebApp: &models.WebAppInfo{URL: "HTTPS_HOSTING_URL"},
 					},
 				},
 			},
@@ -128,6 +128,6 @@ func sendTMAButton(ctx context.Context, b *bot.Bot, update *models.Update) {
 
 	_, err := b.SendMessage(ctx, msg)
 	if err != nil {
-		// Обработка ошибки
+		fmt.Printf("Can't send message with: %s", err)
 	}
 }
