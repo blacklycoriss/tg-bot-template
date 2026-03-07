@@ -65,8 +65,30 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		ChatID: update.Message.Chat.ID,
 		Text:   send_text,
 	})
-
 	log.Printf("Bot say: %s", send_text)
+
+	if user_text == "/start" {
+
+		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID, // ← ваш chat ID (или -100XXXXXXXX для канала)
+			Text:   "Подпишись, Солнышко 🥺",
+			ReplyMarkup: &models.InlineKeyboardMarkup{
+				InlineKeyboard: [][]models.InlineKeyboardButton{
+					{
+						{
+							Text: "Подписаться ❤️",
+							URL:  "nothing",
+						},
+					},
+				},
+			},
+		})
+
+		if err != nil {
+			log.Printf("Failed to send message: %v", err)
+		}
+		log.Printf("Bot say: %s", send_text)
+	}
 }
 
 func showMessageWithUserID(next bot.HandlerFunc) bot.HandlerFunc {
