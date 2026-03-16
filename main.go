@@ -21,6 +21,7 @@ import (
 	"github.com/go-telegram/bot/models"
 	"github.com/lib/pq"
 	_ "github.com/lib/pq" // PostgreSQL driver
+	"github.com/joho/godotenv"
 )
 
 // ============================================================================
@@ -734,6 +735,10 @@ func (h *botHandler) runExpirationCheck(ctx context.Context) {
 // ============================================================================
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
 	// Load configuration
 	cfg, err := loadConfig()
 	if err != nil {
