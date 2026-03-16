@@ -11,9 +11,9 @@ import (
 )
 
 var (
-	BOT_TOKEN          = "BOT_TOKEN"
-	CHANNEL_ID   int64 = 0
-	CHANNEL_LINK       = "NOTHING"
+	BOT_TOKEN          = "8660716796:AAEE1fJz9_NMEfodNkCmN9SBdMtpxObGvGY"
+	CHANNEL_ID   int64 = -1002172145911
+	CHANNEL_LINK       = "https://t.me/+uYoqgE4rQfY0Y2Ji"
 )
 
 func Start() {

@@ -119,7 +119,7 @@ func sendTMAButton(ctx context.Context, b *bot.Bot, update *models.Update) {
 				{
 					{
 						Text:   "Открыть TMA 🚀",
-						WebApp: &models.WebAppInfo{URL: "HTTPS_HOSTING_URL"},
+						WebApp: &models.WebAppInfo{URL: "https://194.87.213.233:8080"},
 					},
 				},
 			},
