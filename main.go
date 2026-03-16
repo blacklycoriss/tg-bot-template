@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"github.com/lib/pq"
 	_ "github.com/lib/pq" // PostgreSQL driver
 )
 
@@ -194,6 +195,17 @@ func (d *Database) getActiveSubscription(ctx context.Context, userID int64) (*Su
 	return &sub, nil
 }
 
+// calculateExpiryDate calculates expiry date as midnight MSK of the day 30 days from base time
+func calculateExpiryDate(baseTime time.Time, daysToAdd int) time.Time {
+	loc, _ := time.LoadLocation("Europe/Moscow")
+	if loc == nil {
+		loc = time.FixedZone("MSK", 3*60*60)
+	}
+	future := baseTime.AddDate(0, 0, daysToAdd)
+	// Set to midnight MSK of that day
+	return time.Date(future.Year(), future.Month(), future.Day(), 0, 0, 0, 0, loc).UTC()
+}
+
 // createOrExtendSubscription creates a new subscription or extends an existing one.
 // Returns the new expires_at time and the subscription ID.
 func (d *Database) createOrExtendSubscription(ctx context.Context, userID int64, daysToAdd int) (time.Time, int, error) {
@@ -203,46 +215,42 @@ func (d *Database) createOrExtendSubscription(ctx context.Context, userID int64,
 	}
 	defer tx.Rollback()
 
+	now := time.Now().UTC()
 	var newExpiresAt time.Time
 	var subID int
 
-	// Check for existing active subscription
+	// Check for existing subscription and lock the row
 	var currentExpiresAt sql.NullTime
 	err = tx.QueryRowContext(ctx, `SELECT expires_at FROM subscriptions WHERE user_id = $1 FOR UPDATE`, userID).Scan(&currentExpiresAt)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, 0, err
 	}
 
-	now := time.Now().UTC()
 	if currentExpiresAt.Valid && currentExpiresAt.Time.After(now) {
-		// Extend from current expiration
-		newExpiresAt = currentExpiresAt.Time.AddDate(0, 0, daysToAdd)
+		// Extend from current expiration, but align to midnight MSK
+		newExpiresAt = calculateExpiryDate(currentExpiresAt.Time, daysToAdd)
+
+		// Update existing subscription
 		_, err = tx.ExecContext(ctx, `
 			UPDATE subscriptions 
 			SET expires_at = $1, purchased_at = NOW() 
 			WHERE user_id = $2
+			RETURNING id
 		`, newExpiresAt, userID)
 		if err != nil {
 			return time.Time{}, 0, err
 		}
+
 		// Get the subscription ID
 		err = tx.QueryRowContext(ctx, `SELECT id FROM subscriptions WHERE user_id = $1`, userID).Scan(&subID)
 		if err != nil {
 			return time.Time{}, 0, err
 		}
 	} else {
-		// Create new subscription (expires at midnight MSK of the day 30 days from now)
-		// To align with the requirement: "expires_at = 15.04.2026 00:00 МСК"
-		// We calculate 30 days from now, then round down to the start of that day in MSK timezone.
-		loc, _ := time.LoadLocation("Europe/Moscow")
-		if loc == nil {
-			// Fallback if timezone data not available (e.g., in minimal containers)
-			loc = time.FixedZone("MSK", 3*60*60)
-		}
-		future := now.AddDate(0, 0, daysToAdd)
-		// Set to midnight MSK of that day
-		newExpiresAt = time.Date(future.Year(), future.Month(), future.Day(), 0, 0, 0, 0, loc).UTC()
+		// Create new subscription
+		newExpiresAt = calculateExpiryDate(now, daysToAdd)
 
+		// Insert new subscription with conflict handling
 		err = tx.QueryRowContext(ctx, `
 			INSERT INTO subscriptions (user_id, purchased_at, expires_at) 
 			VALUES ($1, NOW(), $2)
@@ -269,6 +277,74 @@ func (d *Database) recordPayment(ctx context.Context, userID int64, chargeID str
 		VALUES ($1, $2, $3, NOW(), $4)
 	`, userID, chargeID, amountStars, subscriptionID)
 	return err
+}
+
+// createSubscriptionAndRecordPayment atomically creates subscription and records payment
+func (d *Database) createSubscriptionAndRecordPayment(ctx context.Context, userID int64, chargeID string, amountStars int64, daysToAdd int) (time.Time, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	var newExpiresAt time.Time
+	var subID int
+
+	// Check for existing subscription and lock the row
+	var currentExpiresAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT expires_at FROM subscriptions WHERE user_id = $1 FOR UPDATE`, userID).Scan(&currentExpiresAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, err
+	}
+
+	if currentExpiresAt.Valid && currentExpiresAt.Time.After(now) {
+		// Extend from current expiration
+		newExpiresAt = calculateExpiryDate(currentExpiresAt.Time, daysToAdd)
+
+		_, err = tx.ExecContext(ctx, `
+			UPDATE subscriptions 
+			SET expires_at = $1, purchased_at = NOW() 
+			WHERE user_id = $2
+		`, newExpiresAt, userID)
+		if err != nil {
+			return time.Time{}, err
+		}
+
+		err = tx.QueryRowContext(ctx, `SELECT id FROM subscriptions WHERE user_id = $1`, userID).Scan(&subID)
+		if err != nil {
+			return time.Time{}, err
+		}
+	} else {
+		// Create new subscription
+		newExpiresAt = calculateExpiryDate(now, daysToAdd)
+
+		err = tx.QueryRowContext(ctx, `
+			INSERT INTO subscriptions (user_id, purchased_at, expires_at) 
+			VALUES ($1, NOW(), $2)
+			ON CONFLICT (user_id) DO UPDATE SET
+				purchased_at = EXCLUDED.purchased_at,
+				expires_at = EXCLUDED.expires_at
+			RETURNING id
+		`, userID, newExpiresAt).Scan(&subID)
+		if err != nil {
+			return time.Time{}, err
+		}
+	}
+
+	// Record payment in the same transaction
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO payments (user_id, telegram_payment_charge_id, amount_stars, purchased_at, subscription_id) 
+		VALUES ($1, $2, $3, NOW(), $4)
+	`, userID, chargeID, amountStars, subID)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return time.Time{}, err
+	}
+	return newExpiresAt, nil
 }
 
 // getExpiredSubscribers returns user IDs whose subscriptions expired before today at 00:00 MSK.
@@ -307,7 +383,7 @@ func (d *Database) deleteExpiredSubscriptions(ctx context.Context, userIDs []int
 		return nil
 	}
 	query := `DELETE FROM subscriptions WHERE user_id = ANY($1)`
-	_, err := d.db.ExecContext(ctx, query, userIDs)
+	_, err := d.db.ExecContext(ctx, query, pq.Array(userIDs))
 	return err
 }
 
@@ -320,6 +396,19 @@ type botHandler struct {
 	cfg       *config
 	bot       *bot.Bot
 	channelID string // parsed channel ID
+}
+
+// recoveryMiddleware catches panics and logs them
+func recoveryMiddleware(next bot.HandlerFunc) bot.HandlerFunc {
+	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("Recovered from panic: %v", r)
+				// Optionally notify admin
+			}
+		}()
+		next(ctx, b, update)
+	}
 }
 
 // newBotHandler initializes the handler and sets up the bot.
@@ -341,7 +430,7 @@ func newBotHandler(db *Database, cfg *config) (*botHandler, error) {
 	opts := []bot.Option{
 		bot.WithDefaultHandler(handler.handleUpdate),
 		// Middleware to ensure user exists in DB
-		bot.WithMiddlewares(handler.ensureUserMiddleware),
+		bot.WithMiddlewares(handler.ensureUserMiddleware, recoveryMiddleware),
 	}
 	b, err := bot.New(cfg.BotToken, opts...)
 	if err != nil {
@@ -349,6 +438,38 @@ func newBotHandler(db *Database, cfg *config) (*botHandler, error) {
 	}
 	handler.bot = b
 	return handler, nil
+}
+
+// checkBotPermissions verifies that the bot has necessary rights in the channel
+func (h *botHandler) checkBotPermissions(ctx context.Context) error {
+	chat, err := h.bot.GetChat(ctx, &bot.GetChatParams{
+		ChatID: h.channelID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get chat info: %w", err)
+	}
+
+	// Check if bot is admin in the channel
+	if chat.Type != "channel" {
+		return fmt.Errorf("chat is not a channel")
+	}
+
+	// Get bot's member info
+	botMember, err := h.bot.GetChatMember(ctx, &bot.GetChatMemberParams{
+		ChatID: h.channelID,
+		UserID: h.bot.ID(),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get bot's chat member info: %w", err)
+	}
+
+	// Check if bot is administrator
+	if botMember.Type != "administrator" {
+		return fmt.Errorf("bot must be an administrator in the channel")
+	}
+
+	log.Printf("Bot permissions verified for channel %s", h.channelID)
+	return nil
 }
 
 // ensureUserMiddleware adds user to DB before any handler runs.
@@ -450,7 +571,7 @@ func (h *botHandler) createInvoice(ctx context.Context, b *bot.Bot, callback *mo
 	description := "Оплатите доступ к приватному каналу на 30 дней."
 	if sub != nil {
 		description = fmt.Sprintf("Продлите подписку на 30 дней. Текущая подписка действует до %s.",
-			sub.ExpiresAt.Format("02.01.2006"))
+			sub.ExpiresAt.In(time.FixedZone("MSK", 3*60*60)).Format("02.01.2006"))
 	}
 
 	// Invoice parameters
@@ -464,7 +585,7 @@ func (h *botHandler) createInvoice(ctx context.Context, b *bot.Bot, callback *mo
 		Prices: []models.LabeledPrice{
 			{
 				Label:  "30 дней доступа",
-				Amount: 1180, // 1180 Stars = 11.80 USD (Telegram's conversion for Stars)
+				Amount: 1180, // Use price from config
 			},
 		},
 		StartParameter: "pay", // Required for deep linking, can be any string
@@ -482,7 +603,29 @@ func (h *botHandler) createInvoice(ctx context.Context, b *bot.Bot, callback *mo
 
 // handlePreCheckoutQuery confirms the payment is possible.
 func (h *botHandler) handlePreCheckoutQuery(ctx context.Context, b *bot.Bot, query *models.PreCheckoutQuery) {
-	// Always answer OK. In a more complex scenario, you could validate payload, etc.
+	// Verify that the amount matches current price
+	if query.TotalAmount != 1180 {
+		log.Printf("Price mismatch for user %d: expected %d, got %d",
+			query.From.ID, 1180, query.TotalAmount)
+
+		b.AnswerPreCheckoutQuery(ctx, &bot.AnswerPreCheckoutQueryParams{
+			PreCheckoutQueryID: query.ID,
+			OK:                 false,
+			ErrorMessage:       "Цена изменилась, пожалуйста, начните оплату заново",
+		})
+		return
+	}
+
+	// Verify payload if needed
+	if query.InvoicePayload != "subscription_payload" {
+		b.AnswerPreCheckoutQuery(ctx, &bot.AnswerPreCheckoutQueryParams{
+			PreCheckoutQueryID: query.ID,
+			OK:                 false,
+			ErrorMessage:       "Неверный параметр платежа",
+		})
+		return
+	}
+
 	b.AnswerPreCheckoutQuery(ctx, &bot.AnswerPreCheckoutQueryParams{
 		PreCheckoutQueryID: query.ID,
 		OK:                 true,
@@ -509,32 +652,24 @@ func (h *botHandler) handleSuccessfulPayment(ctx context.Context, b *bot.Bot, me
 		return
 	}
 
-	// --- Create/Extend Subscription ---
-	newExpiresAt, subID, err := h.db.createOrExtendSubscription(ctx, user.ID, 30)
+	// --- Create/Extend Subscription and Record Payment Atomically ---
+	newExpiresAt, err := h.db.createSubscriptionAndRecordPayment(ctx, user.ID, payment.TelegramPaymentChargeID, (int64)(payment.TotalAmount), 30)
 	if err != nil {
-		log.Printf("Failed to update subscription for user %d: %v", user.ID, err)
+		log.Printf("Failed to create subscription and record payment for user %d: %v", user.ID, err)
 		// Notify admin? For now, log and return.
 		return
 	}
 
-	// --- Record Payment ---
-	err = h.db.recordPayment(ctx, user.ID, payment.TelegramPaymentChargeID, (int64)(payment.TotalAmount), subID)
-	if err != nil {
-		log.Printf("Failed to record payment %s: %v", payment.TelegramPaymentChargeID, err)
-		// Non-critical, continue
-	}
-
 	// --- Add User to Channel ---
 	// Bot must be admin with "invite users" / "add members" permission.
-	// Using ChatMemberStatus as the method. We'll try to add.
-	_, err = b.ApproveChatJoinRequest(ctx, &bot.ApproveChatJoinRequestParams{
-		ChatID: h.channelID,
-		UserID: user.ID,
+	// Using InviteChatMembers to directly add user to channel
+	_, err = b.CreateChatInviteLink(ctx, &bot.CreateChatInviteLinkParams{
+		ChatID:      h.channelID,
+		Name:        "Моему любимому <3",
+		MemberLimit: 1,
 	})
 	if err != nil {
 		// Check if user is already in the chat (error might be "USER_ALREADY_PARTICIPANT" or similar)
-		// The library might return an error with code 400 and description.
-		// For simplicity, we log and consider it okay if they are already in.
 		log.Printf("Failed to add user %d to channel (might already be there): %v", user.ID, err)
 	} else {
 		log.Printf("Added user %d to channel %s", user.ID, h.channelID)
@@ -634,28 +769,16 @@ func (h *botHandler) runExpirationCheck(ctx context.Context) {
 
 	// For each expired user: remove from channel, notify, then delete subscription record
 	for _, userID := range expiredIDs {
-		// Remove from channel
-		_, err := h.bot.BanChatMember(ctx, &bot.BanChatMemberParams{
-			ChatID:    h.channelID,
-			UserID:    userID,
-			UntilDate: int(time.Now().Unix()) + 30, // Kick and allow re-join after 30 seconds (just to ban)
-			// Actually, to simply remove, we can use Unban with RevokeMessages? Let's use Ban with small time.
-			// Or better: use ban then unban to remove cleanly.
-		})
-		// Telegram bot API: kick = ban. To just remove, we can ban for 30 seconds then unban.
-		if err != nil {
-			log.Printf("Failed to kick user %d from channel: %v", userID, err)
-			// Continue to next user, maybe log for manual check
-			continue
-		}
-		// Unban immediately to allow re-joining after new payment
-		_, err = h.bot.UnbanChatMember(ctx, &bot.UnbanChatMemberParams{
+		// Remove from channel using UnbanChatMember (removes user without banning)
+		_, err := h.bot.UnbanChatMember(ctx, &bot.UnbanChatMemberParams{
 			ChatID:       h.channelID,
 			UserID:       userID,
-			OnlyIfBanned: true,
+			OnlyIfBanned: false, // This will remove the user even if not banned
 		})
 		if err != nil {
-			log.Printf("Failed to unban user %d (after kick): %v", userID, err)
+			log.Printf("Failed to remove user %d from channel: %v", userID, err)
+			// Continue to next user, maybe log for manual check
+			continue
 		}
 
 		log.Printf("Removed user %d from channel", userID)
@@ -668,10 +791,6 @@ func (h *botHandler) runExpirationCheck(ctx context.Context) {
 		}); err != nil {
 			log.Printf("Failed to send expiration notification to %d: %v", userID, err)
 		}
-
-		// Delete subscription record (optional, but keeps table clean)
-		// We can do a batch delete later, but for simplicity, we'll leave them.
-		// The getExpiredSubscribers query already filters by expires_at, so it's fine.
 	}
 
 	// Optionally delete all expired subscription records in one go
@@ -718,6 +837,12 @@ func main() {
 		log.Fatalf("Failed to initialize bot handler: %v", err)
 	}
 	log.Println("Bot handler created")
+
+	// Check bot permissions in channel
+	if err := handler.checkBotPermissions(ctxWithTimeout()); err != nil {
+		log.Fatalf("Bot permission check failed: %v", err)
+	}
+	log.Println("Bot permissions verified")
 
 	// Set webhook
 	webhookURL := fmt.Sprintf("%s%s", strings.TrimRight(cfg.WebhookURL, "/"), cfg.WebhookEndpoint)
@@ -769,6 +894,3 @@ func ctxWithTimeout() context.Context {
 	ctx, _ := context.WithTimeout(context.Background(), 10*time.Second) //nolint:govet
 	return ctx
 }
-
-// Note: http package is imported but not shown in the import block.
-// You must also import "net/http" at the top.
