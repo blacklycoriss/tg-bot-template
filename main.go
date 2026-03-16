@@ -206,79 +206,6 @@ func calculateExpiryDate(baseTime time.Time, daysToAdd int) time.Time {
 	return time.Date(future.Year(), future.Month(), future.Day(), 0, 0, 0, 0, loc).UTC()
 }
 
-// createOrExtendSubscription creates a new subscription or extends an existing one.
-// Returns the new expires_at time and the subscription ID.
-func (d *Database) createOrExtendSubscription(ctx context.Context, userID int64, daysToAdd int) (time.Time, int, error) {
-	tx, err := d.db.BeginTx(ctx, nil)
-	if err != nil {
-		return time.Time{}, 0, err
-	}
-	defer tx.Rollback()
-
-	now := time.Now().UTC()
-	var newExpiresAt time.Time
-	var subID int
-
-	// Check for existing subscription and lock the row
-	var currentExpiresAt sql.NullTime
-	err = tx.QueryRowContext(ctx, `SELECT expires_at FROM subscriptions WHERE user_id = $1 FOR UPDATE`, userID).Scan(&currentExpiresAt)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, 0, err
-	}
-
-	if currentExpiresAt.Valid && currentExpiresAt.Time.After(now) {
-		// Extend from current expiration, but align to midnight MSK
-		newExpiresAt = calculateExpiryDate(currentExpiresAt.Time, daysToAdd)
-
-		// Update existing subscription
-		_, err = tx.ExecContext(ctx, `
-			UPDATE subscriptions 
-			SET expires_at = $1, purchased_at = NOW() 
-			WHERE user_id = $2
-			RETURNING id
-		`, newExpiresAt, userID)
-		if err != nil {
-			return time.Time{}, 0, err
-		}
-
-		// Get the subscription ID
-		err = tx.QueryRowContext(ctx, `SELECT id FROM subscriptions WHERE user_id = $1`, userID).Scan(&subID)
-		if err != nil {
-			return time.Time{}, 0, err
-		}
-	} else {
-		// Create new subscription
-		newExpiresAt = calculateExpiryDate(now, daysToAdd)
-
-		// Insert new subscription with conflict handling
-		err = tx.QueryRowContext(ctx, `
-			INSERT INTO subscriptions (user_id, purchased_at, expires_at) 
-			VALUES ($1, NOW(), $2)
-			ON CONFLICT (user_id) DO UPDATE SET
-				purchased_at = EXCLUDED.purchased_at,
-				expires_at = EXCLUDED.expires_at
-			RETURNING id
-		`, userID, newExpiresAt).Scan(&subID)
-		if err != nil {
-			return time.Time{}, 0, err
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return time.Time{}, 0, err
-	}
-	return newExpiresAt, subID, nil
-}
-
-// recordPayment stores payment information and links it to a subscription.
-func (d *Database) recordPayment(ctx context.Context, userID int64, chargeID string, amountStars int64, subscriptionID int) error {
-	_, err := d.db.ExecContext(ctx, `
-		INSERT INTO payments (user_id, telegram_payment_charge_id, amount_stars, purchased_at, subscription_id) 
-		VALUES ($1, $2, $3, NOW(), $4)
-	`, userID, chargeID, amountStars, subscriptionID)
-	return err
-}
-
 // createSubscriptionAndRecordPayment atomically creates subscription and records payment
 func (d *Database) createSubscriptionAndRecordPayment(ctx context.Context, userID int64, chargeID string, amountStars int64, daysToAdd int) (time.Time, error) {
 	tx, err := d.db.BeginTx(ctx, nil)
@@ -546,9 +473,10 @@ func (h *botHandler) handleStart(ctx context.Context, b *bot.Bot, message *model
 
 // handleCallbackQuery processes button presses.
 func (h *botHandler) handleCallbackQuery(ctx context.Context, b *bot.Bot, callback *models.CallbackQuery) {
-	if callback.Data == "pay" {
+	switch callback.Data {
+	case "pay":
 		h.createInvoice(ctx, b, callback)
-	} else if callback.Data == "show_links" {
+	case "show_links":
 		h.showLinks(ctx, b, callback)
 	}
 	// Always answer callback to remove loading state
@@ -839,14 +767,18 @@ func main() {
 	log.Println("Bot handler created")
 
 	// Check bot permissions in channel
-	if err := handler.checkBotPermissions(ctxWithTimeout()); err != nil {
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer checkCancel()
+	if err := handler.checkBotPermissions(checkCtx); err != nil {
 		log.Fatalf("Bot permission check failed: %v", err)
 	}
 	log.Println("Bot permissions verified")
 
 	// Set webhook
+	webhookCtx, webhookCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer webhookCancel()
 	webhookURL := fmt.Sprintf("%s%s", strings.TrimRight(cfg.WebhookURL, "/"), cfg.WebhookEndpoint)
-	if _, err := handler.bot.SetWebhook(ctxWithTimeout(), &bot.SetWebhookParams{
+	if _, err := handler.bot.SetWebhook(webhookCtx, &bot.SetWebhookParams{
 		URL: webhookURL,
 	}); err != nil {
 		log.Fatalf("Failed to set webhook: %v", err)
@@ -888,9 +820,4 @@ func main() {
 	}
 
 	log.Println("Bot stopped")
-}
-
-func ctxWithTimeout() context.Context {
-	ctx, _ := context.WithTimeout(context.Background(), 10*time.Second) //nolint:govet
-	return ctx
 }
